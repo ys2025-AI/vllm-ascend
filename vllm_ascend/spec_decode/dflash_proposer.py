@@ -1,7 +1,15 @@
+import os
 from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
+
+
+def _force_sample_from_anchor() -> bool:
+    # EXPERIMENT PATCH: force the DFlash proposer onto the sample-from-anchor
+    # query-block construction (num_query=num_spec, kernel SAMPLE_FROM_ANCHOR=True).
+    # Default off so z-lab DFlash (bonus-anchor) is unaffected.
+    return os.environ.get("DFLASH_FORCE_SAMPLE_FROM_ANCHOR", "0") == "1"
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
@@ -78,7 +86,9 @@ class AscendDflashProposer(AscendEagleProposer):
         # Q from query embeddings (bonus + mask tokens).
         batch_size = cad.num_reqs
         num_context = target_token_ids.shape[0]
-        num_query_per_req = 1 + self.num_speculative_tokens
+        _force_sfa = _force_sample_from_anchor()
+        num_query_per_req = (self.num_speculative_tokens if _force_sfa
+                            else 1 + self.num_speculative_tokens)
         num_query_total = batch_size * num_query_per_req
 
         self._dflash_num_context = num_context
@@ -119,6 +129,7 @@ class AscendDflashProposer(AscendEagleProposer):
             total_input_tokens=num_context,
             batch_size=batch_size,
             HAS_NUM_REJECTED=has_num_rejected,
+            SAMPLE_FROM_ANCHOR=_force_sfa,
         )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
@@ -171,7 +182,9 @@ class AscendDflashProposer(AscendEagleProposer):
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
-        num_query_per_req = 1 + self.num_speculative_tokens
+        _force_sfa = _force_sample_from_anchor()
+        num_query_per_req = (self.num_speculative_tokens if _force_sfa
+                            else 1 + self.num_speculative_tokens)
         num_query_total = num_reqs * num_query_per_req
 
         context_positions = self._context_positions_buffer[:num_input_tokens]
